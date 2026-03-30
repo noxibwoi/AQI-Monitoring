@@ -12,7 +12,10 @@
 #define GASPIN A0
 #define RL 1.0
 #define R0 35.0
-#define WARMUP_TIME 180000UL
+#define WARMUP_TIME 5000
+#define LED_READY 5   
+#define LED_ALERT 6 
+#define BUZZER 7  
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 DHT dht(DHTPIN, DHTTYPE);
@@ -25,6 +28,8 @@ int dataMod = 0;
 unsigned long lastUpdate = 0;
 unsigned long startTime = 0;
 bool warmupDone = false;
+unsigned long lastBeep = 0;
+bool beepState = false;
 
 uint8_t graph[64];
 uint8_t graphTemp[64];
@@ -54,6 +59,12 @@ void setup() {
 
     pinMode(BUTTON_SENS, INPUT_PULLUP);
     pinMode(BUTTON_MOD, INPUT_PULLUP);
+    pinMode(LED_READY, OUTPUT);
+    pinMode(LED_ALERT, OUTPUT);
+    pinMode(BUZZER, OUTPUT);
+    digitalWrite(BUZZER, LOW);
+    digitalWrite(LED_READY, LOW);
+    digitalWrite(LED_ALERT, LOW);
 
     if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
         Serial.println(F("OLED missing"));
@@ -100,7 +111,7 @@ void loop() {
         updateDisplay();
     }
 
-    if (now - lastUpdate >= 2000) {
+    if (now - lastUpdate >= 1000) {
         lastUpdate = now;
 
         float newTemp = dht.readTemperature();
@@ -114,7 +125,11 @@ void loop() {
             sensorError = true;
         }
 
-        if (warmupDone) co2ppm = readCO2();
+        digitalWrite(LED_READY, warmupDone ? HIGH : LOW);
+        if (warmupDone) {
+            co2ppm = readCO2();
+            digitalWrite(LED_ALERT, int(co2ppm) > 2000? HIGH : LOW);
+        }
 
         for (int i = 0; i < 63; i++) graph[i]     = graph[i + 1];
         for (int i = 0; i < 63; i++) graphTemp[i] = graphTemp[i + 1];
@@ -125,6 +140,23 @@ void loop() {
         graphGas[63]  = warmupDone ? (uint8_t)constrain(map((int)co2ppm, 0, 2000, 62, 18), 18, 62) : 40;
 
         updateDisplay();
+    }
+
+    if (warmupDone) {
+        if ((int)co2ppm > 2000) {
+            if (beepState && now - lastBeep >= 200) {
+                digitalWrite(BUZZER, LOW);
+                beepState = false;
+                lastBeep = now;
+            } else if (!beepState && now - lastBeep >= 400) {
+                digitalWrite(BUZZER, HIGH);
+                beepState = true;
+                lastBeep = now;
+            }
+        } else {
+            digitalWrite(BUZZER, LOW);
+            beepState = false;
+        }
     }
 
     bool buttonStateSens = digitalRead(BUTTON_SENS);
@@ -170,7 +202,7 @@ void updateDisplay() {
 
     if (sensMod == 0) {
         display.setCursor(0, 0);
-        display.println(F("All"));
+        display.println(F("AQI Monitoring"));
         if (dataMod == 0) {
             display.setCursor(0, 20);
             display.print(F("Temp: "));
@@ -230,6 +262,7 @@ void updateDisplay() {
         }
         if (dataMod == 0) {
             display.setCursor(0, 20);
+            display.drawRect(0, 53, SCREEN_WIDTH, 8, WHITE);
             if (warmupDone) {
                 display.print(F("CO2: "));
                 display.print((int)co2ppm);
@@ -239,6 +272,8 @@ void updateDisplay() {
                 else if (co2ppm < 1000) display.println(F("Air: Moderate"));
                 else if (co2ppm < 2000) display.println(F("Air: Poor"));
                 else                    display.println(F("Air: Bad"));
+                int barWidth = constrain(map((int)co2ppm, 0, 2000, 0, SCREEN_WIDTH), 0, SCREEN_WIDTH);
+                display.fillRect(0, 53, barWidth, 8, WHITE);
             } else {
                 display.println(F("Waiting for"));
                 display.setCursor(0, 30);
@@ -268,8 +303,8 @@ void updateDisplay() {
             display.print(humid, 1);
             display.println(F(" %"));
             int barWidth = map(humid, 0, 100, 0, SCREEN_WIDTH);
-            display.drawRect(0, 56, SCREEN_WIDTH, 8, WHITE);
-            display.fillRect(0, 56, barWidth, 8, WHITE);
+            display.drawRect(0, 53, SCREEN_WIDTH, 8, WHITE);
+            display.fillRect(0, 53, barWidth, 8, WHITE);
         } else {
             for (int x = 1; x < 64; x++) {
                 display.drawLine((x-1)*2, graph[x-1],     x*2, graph[x],     WHITE);
