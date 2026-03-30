@@ -10,6 +10,9 @@
 #define DHTPIN 4
 #define DHTTYPE DHT11
 #define GASPIN A0
+#define RL 1.0
+#define R0 35.0
+#define WARMUP_TIME 180000UL
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 DHT dht(DHTPIN, DHTTYPE);
@@ -20,6 +23,8 @@ bool buttonDataFlag = false;
 int sensMod = 0;
 int dataMod = 0;
 unsigned long lastUpdate = 0;
+unsigned long startTime = 0;
+bool warmupDone = false;
 
 uint8_t graph[64];
 uint8_t graphTemp[64];
@@ -27,47 +32,57 @@ uint8_t graphGas[64];
 
 float temp;
 float humid;
-int gasVal;
+float co2ppm;
+
+float readCO2() {
+    int gasSum = 0;
+    for (int i = 0; i < 8; i++) {
+        gasSum += analogRead(GASPIN);
+        delay(1);
+    }
+    int raw = gasSum / 8;
+    float voltage = raw * (5.0 / 1023.0);
+    float RS = ((5.0 - voltage) / voltage) * RL;
+    float ratio = RS / R0;
+    return 110.47 * pow(ratio, -2.862);
+}
 
 void setup() {
     Serial.begin(9600);
+    Serial.println(F("Started"));
     dht.begin();
 
     pinMode(BUTTON_SENS, INPUT_PULLUP);
     pinMode(BUTTON_MOD, INPUT_PULLUP);
 
     if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-        Serial.println("OLED missing");
+        Serial.println(F("OLED missing"));
         while (1);
     }
+    delay(250);
+    display.clearDisplay();
+    display.display();
 
-    // wait for DHT11 and get first reading
     delay(2000);
     temp = dht.readTemperature();
     humid = dht.readHumidity();
-
-    // average gas reading
-    int gasSum = 0;
-    for (int i = 0; i < 8; i++) {
-        gasSum += analogRead(GASPIN);
-        delay(1);
-    }
-    gasVal = gasSum / 8;
-
     if (isnan(temp) || isnan(humid)) {
         sensorError = true;
         temp = 0;
         humid = 0;
     }
 
-    // initialize all graphs to actual first values
-    uint8_t initHum  = (uint8_t)constrain(map((int)humid, 0, 100,  62, 18), 18, 62);
-    uint8_t initTemp = (uint8_t)constrain(map((int)temp,  0, 50,   62, 18), 18, 62);
-    uint8_t initGas  = (uint8_t)constrain(map(gasVal,     0, 1023, 62, 18), 18, 62);
+    co2ppm = 0;
+
+    uint8_t initHum  = (uint8_t)constrain(map((int)humid, 0, 100, 62, 18), 18, 62);
+    uint8_t initTemp = (uint8_t)constrain(map((int)temp,  0, 50,  62, 18), 18, 62);
 
     for (int i = 0; i < 64; i++) graph[i]     = initHum;
     for (int i = 0; i < 64; i++) graphTemp[i] = initTemp;
-    for (int i = 0; i < 64; i++) graphGas[i]  = initGas;
+    for (int i = 0; i < 64; i++) graphGas[i]  = 40;
+
+    startTime = millis();
+    warmupDone = false;
 
     updateDisplay();
 }
@@ -75,34 +90,39 @@ void setup() {
 void loop() {
     unsigned long now = millis();
 
+    if (!warmupDone && now - startTime >= WARMUP_TIME) {
+        warmupDone = true;
+        co2ppm = readCO2();
+        uint8_t initGas = (uint8_t)constrain(map((int)co2ppm, 0, 2000, 62, 18), 18, 62);
+        for (int i = 0; i < 64; i++) graphGas[i] = initGas;
+        Serial.print(F("Warmup done. CO2: "));
+        Serial.println(co2ppm);
+        updateDisplay();
+    }
+
     if (now - lastUpdate >= 2000) {
         lastUpdate = now;
 
-        temp = dht.readTemperature();
-        humid = dht.readHumidity();
+        float newTemp = dht.readTemperature();
+        float newHumid = dht.readHumidity();
 
-        // average gas reading
-        int gasSum = 0;
-        for (int i = 0; i < 8; i++) {
-            gasSum += analogRead(GASPIN);
-            delay(1);
-        }
-        gasVal = gasSum / 8;
-
-        if (isnan(temp) || isnan(humid)) {
-            sensorError = true;
-        } else {
+        if (!isnan(newTemp) && !isnan(newHumid)) {
             sensorError = false;
+            temp = newTemp;
+            humid = newHumid;
+        } else {
+            sensorError = true;
         }
 
-        // shift and update all graphs
+        if (warmupDone) co2ppm = readCO2();
+
         for (int i = 0; i < 63; i++) graph[i]     = graph[i + 1];
         for (int i = 0; i < 63; i++) graphTemp[i] = graphTemp[i + 1];
         for (int i = 0; i < 63; i++) graphGas[i]  = graphGas[i + 1];
 
-        graph[63]     = (uint8_t)constrain(map((int)humid, 0, 100,  62, 18), 18, 62);
-        graphTemp[63] = (uint8_t)constrain(map((int)temp,  0, 50,   62, 18), 18, 62);
-        graphGas[63]  = (uint8_t)constrain(map(gasVal,     0, 1023, 62, 18), 18, 62);
+        graph[63]     = (uint8_t)constrain(map((int)humid,  0, 100,  62, 18), 18, 62);
+        graphTemp[63] = (uint8_t)constrain(map((int)temp,   0, 50,   62, 18), 18, 62);
+        graphGas[63]  = warmupDone ? (uint8_t)constrain(map((int)co2ppm, 0, 2000, 62, 18), 18, 62) : 40;
 
         updateDisplay();
     }
@@ -132,29 +152,42 @@ void updateDisplay() {
     display.setTextSize(1);
     display.setTextColor(WHITE);
 
+    if (!warmupDone) {
+        int remaining = constrain((int)((WARMUP_TIME - (millis() - startTime)) / 1000), 0, 180);
+        display.setCursor(90, 0);
+        display.print(remaining);
+        display.print(F("s"));
+        int barWidth = map(remaining, 180, 0, 0, SCREEN_WIDTH);
+        display.fillRect(0, 63, barWidth, 1, WHITE);
+    }
+
     if (sensorError) {
         display.setCursor(0, 0);
-        display.println("DHT11 Sensor Error :(");
+        display.println(F("DHT11 Sensor Error :("));
         display.display();
         return;
     }
 
-    // sensMod 0 — All sensors
     if (sensMod == 0) {
         display.setCursor(0, 0);
-        display.println("All");
+        display.println(F("All"));
         if (dataMod == 0) {
             display.setCursor(0, 20);
-            display.print("Temp: ");
+            display.print(F("Temp: "));
             display.print(temp, 1);
-            display.println(" C");
+            display.println(F(" C"));
             display.setCursor(0, 30);
-            display.print("Humid: ");
+            display.print(F("Humid: "));
             display.print(humid, 1);
-            display.println(" %");
+            display.println(F(" %"));
             display.setCursor(0, 40);
-            display.print("Gas: ");
-            display.println(gasVal);
+            display.print(F("CO2: "));
+            if (warmupDone) {
+                display.print((int)co2ppm);
+                display.println(F(" PPM"));
+            } else {
+                display.println(F("warming..."));
+            }
         } else {
             for (int x = 1; x < 64; x++) {
                 display.drawLine((x-1)*2, graph[x-1],     x*2, graph[x],     WHITE);
@@ -174,53 +207,66 @@ void updateDisplay() {
 
             display.setCursor(100, humY);
             display.print((int)humid);
-            display.print("%");
+            display.print(F("%"));
 
             display.setCursor(100, tempY);
             display.print((int)temp);
-            display.print("C");
+            display.print(F("C"));
 
             display.setCursor(100, gasY);
-            display.print(gasVal);
+            if (warmupDone) display.print((int)co2ppm);
+            else display.print(F("--"));
         }
     }
 
-    // sensMod 1 — Gas sensor
     else if (sensMod == 1) {
         display.setCursor(0, 0);
-        display.print("Gas ");
-        display.println(gasVal);
+        display.print(F("CO2 "));
+        if (warmupDone) {
+            display.print((int)co2ppm);
+            display.println(F("PPM"));
+        } else {
+            display.println(F("warming..."));
+        }
         if (dataMod == 0) {
             display.setCursor(0, 20);
-            display.print("Raw: ");
-            display.println(gasVal);
-            display.setCursor(0, 30);
-            display.print("Voltage: ");
-            display.print(gasVal * (5.0 / 1023.0), 2);
-            display.println("V");
+            if (warmupDone) {
+                display.print(F("CO2: "));
+                display.print((int)co2ppm);
+                display.println(F(" PPM"));
+                display.setCursor(0, 30);
+                if (co2ppm < 500)       display.println(F("Air: Good"));
+                else if (co2ppm < 1000) display.println(F("Air: Moderate"));
+                else if (co2ppm < 2000) display.println(F("Air: Poor"));
+                else                    display.println(F("Air: Bad"));
+            } else {
+                display.println(F("Waiting for"));
+                display.setCursor(0, 30);
+                display.println(F("MQ135 warmup..."));
+            }
         } else {
             for (int x = 1; x < 64; x++) {
                 display.drawLine((x-1)*2, graphGas[x-1], x*2, graphGas[x], WHITE);
             }
             int gasY = constrain((int)graphGas[63] - 4, 18, 54);
             display.setCursor(100, gasY);
-            display.println(gasVal);
+            if (warmupDone) display.print((int)co2ppm);
+            else display.print(F("--"));
         }
     }
 
-    // sensMod 2 — Temperature + Humidity
     else if (sensMod == 2) {
         display.setCursor(0, 0);
-        display.println("Temp+Humid");
+        display.println(F("Temp+Humid"));
         if (dataMod == 0) {
             display.setCursor(0, 20);
-            display.print("Temp: ");
+            display.print(F("Temp: "));
             display.print(temp, 1);
-            display.println(" C");
+            display.println(F(" C"));
             display.setCursor(0, 30);
-            display.print("Humid: ");
+            display.print(F("Humid: "));
             display.print(humid, 1);
-            display.println(" %");
+            display.println(F(" %"));
             int barWidth = map(humid, 0, 100, 0, SCREEN_WIDTH);
             display.drawRect(0, 56, SCREEN_WIDTH, 8, WHITE);
             display.fillRect(0, 56, barWidth, 8, WHITE);
@@ -236,11 +282,11 @@ void updateDisplay() {
 
             display.setCursor(100, humY);
             display.print((int)humid);
-            display.println("%");
+            display.println(F("%H"));
 
             display.setCursor(100, tempY);
             display.print((int)temp);
-            display.println("C");
+            display.println(F("CT"));
         }
     }
 
