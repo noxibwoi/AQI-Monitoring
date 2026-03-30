@@ -12,7 +12,7 @@
 #define GASPIN A0
 #define RL 1.0
 #define R0 35.0
-#define WARMUP_TIME 5000
+#define WARMUP_TIME 180000U
 #define LED_READY 5   
 #define LED_ALERT 6 
 #define BUZZER 7  
